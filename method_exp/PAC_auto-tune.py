@@ -485,4 +485,4 @@ if __name__ == "__main__":
     ax4.set_title('Cold Start Exceed Ratio')
     add_value_labels(ax4, cold_ratio_exceed_rate)
 
-    plt.savefig("SPES_result.png")
+    plt.savefig("./PAC_auto-tune_result/PAC_auto-tune_result.png")

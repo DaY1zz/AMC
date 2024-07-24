@@ -20,158 +20,9 @@ sys.path.append('/home/dell/xyf/AMC')
 from common import *
 
 if __name__ == "__main__": 
+    with open('/home/dell/xyf/AMC/variables_checkpoint.pkl', "rb") as file:
+        train_func_ids, test_func_arrcount, func_class, func_lst, func_corr_lst, test_func_corr, test_func_corr_perform= pkl.load(file)
 
-    # 加载数据
-    file_name = "/home/dell/xyf/azure-data/invocations_per_function_md.anon.d"
-    train_file_names, test_file_names = [file_name+"%02d.csv" % (i) for i in range(1, 13)], [file_name+"13.csv", file_name+"14.csv"]
-
-    train_func_arrcount = {}    #函数负载数据
-    train_func_owner_app = {}   
-    train_owner_func = defaultdict(set)
-    train_app_func = defaultdict(set)
-
-    func_trigger = defaultdict(set)
-
-    for i, file in enumerate(train_file_names):
-        df = pd.read_csv(file)
-        
-        for _, row in df.iterrows():
-            func = row["HashFunction"]
-            train_func_owner_app[func] = row["HashOwner"]+'\t'+row["HashApp"]
-            train_owner_func[row["HashOwner"]].add(func)
-            train_app_func[row["HashApp"]].add(func)
-            func_trigger[func].add(row["Trigger"])
-            
-            if func not in train_func_arrcount:
-                train_func_arrcount[func] = [0]*12*1440     # 空缺补0
-            train_func_arrcount[func][i*1440: (i+1)*1440] = list(row[4:].values)
-        del df
-
-    test_func_arrcount = {}
-    test_func_owner_app = {}
-    test_owner_func = defaultdict(set)
-    test_app_func = defaultdict(set)
-
-    for i, file in enumerate(test_file_names):
-        df = pd.read_csv(file)
-        
-        for _, row in df.iterrows():
-            func = row["HashFunction"]
-            test_func_owner_app[func] = row["HashOwner"]+'\t'+row["HashApp"]
-            test_owner_func[row["HashOwner"]].add(func)
-            test_app_func[row["HashApp"]].add(func)
-            func_trigger[func].add(row["Trigger"])
-            
-            if func not in test_func_arrcount:
-                test_func_arrcount[func] = [0]*2*1440       # 空缺补0
-            test_func_arrcount[func][i*1440: (i+1)*1440] = list(row[4:].values)
-        del df
-    train_NUM, test_NUM = len(train_func_arrcount), len(test_func_arrcount)
-
-    func_class = {}
-    with open("/home/dell/xyf/azurefunctions-dataset2019/mid-data/train_info_assigned.txt") as rf:    # 所有函数的负载数据 hashID  forget  loadarray
-        for line in rf:
-            func, type, forget = line.strip().split('\t')
-            func_class[func] = func_state(_type=int(type), forget=int(forget))
-    print(len(func_class))
-
-    # 分类计算基本信息
-    additional_poss_num = 0
-    c = 0
-    with tqdm(total=train_NUM) as pbar:
-        for func in train_func_arrcount:
-            func_class[func].reset(True)
-            c += 1
-            if c % shown_func_num == 0:
-                pbar.update(shown_func_num)
-                
-            if func_class[func].type == WARM: continue
-                
-            func_class[func].pred_interval = [] #pred_value
-
-            arrcount = train_func_arrcount[func][1440*func_class[func].forget:]
-            func_class[func].last_call = np.where(np.array(arrcount)>0)[0][-1] - len(arrcount)
-            #assert func_class[func].last_call < 0
-
-            invok = conj_seq_lst(arrcount, count_invoke=True)
-            non_invok = conj_seq_lst(arrcount)
-
-            func_class[func].wait_time = non_invok[-1] if arrcount[-1] == 0 else 0
-            func_class[func].pre_call_start = func_class[func].last_call - invok[-1] + 1
-
-            func_class[func].lasting_info = {"max": np.max(invok), "seq_num": len(invok)}
-            func_class[func].idle_info = {"max": np.max(non_invok), "std": np.std(non_invok), "kind": len(set(non_invok))}
-            
-            if func_class[func].type == REGULAR:
-                func_class[func].pred_interval = [np.median(non_invok)]
-    
-    # 加载测试集函数
-    func_lst, func_corr_lst = set(), set()
-    num_unseen_func = 0
-    for func in func_class:
-        if func_class[func].type == CORR:
-            func_corr_lst.add(func)
-        else:
-            func_lst.add(func)
-
-    for func in test_func_arrcount:
-        if func in func_class: 
-            continue
-        num_unseen_func += 1
-        func_lst.add(func)      # Unseen 函数 训练集中未出现的函数   
-        func_class[func] = func_state() 
-        
-
-    func_lst, func_corr_lst = list(func_lst), list(func_corr_lst)
-    print(len(func_class), len(func_lst)+len(func_corr_lst), len(test_func_arrcount), num_unseen_func)
-
-    test_func_corr = defaultdict(set)
-    for func, ownerapp in test_func_owner_app.items():
-        if func not in train_func_arrcount:
-            owner, app = ownerapp.split('\t')
-            candi_func_set = (test_owner_func[owner] | test_app_func[app])
-            if len(candi_func_set) == 1: continue
-            
-            candi_func_set.remove(func)
-            for candi_func in candi_func_set:
-                if len(func_trigger[func] & func_trigger[candi_func]) > 0:  #判断字符串是否相等
-                    test_func_corr[func].add(candi_func)
-
-    test_func_corr_perform = {func: {candi_func: 0} for candi_func in test_func_corr[func]}
-    
-    for func in test_func_arrcount:
-        if func in func_class and (func not in train_func_arrcount):
-            del func_class[func]
-        if func not in func_class:
-            func_class[func] = func_state()
-    
-    c = 0
-    with tqdm(total=train_NUM) as pbar:
-        for func in train_func_arrcount:
-            func_class[func].reset(True)
-            c += 1
-            if c % shown_func_num == 0:
-                pbar.update(shown_func_num)
-                
-            if func_class[func].type == WARM: continue
-            arrcount = train_func_arrcount[func][1440*func_class[func].forget:]
-            func_class[func].last_call = np.where(np.array(arrcount)>0)[0][-1] - len(arrcount)
-            invok = conj_seq_lst(arrcount, count_invoke=True)
-            non_invok = conj_seq_lst(arrcount)
-
-            func_class[func].wait_time = non_invok[-1] if arrcount[-1] == 0 else 0
-            func_class[func].pre_call_start = func_class[func].last_call - invok[-1] + 1
-
-    for func in train_func_arrcount: # calculate next invok start at time 0
-        _type = func_class[func].type
-
-        if _type == REGULAR: 
-            p = func_class[func].last_call + 1
-            if p < 0:
-                p += (func_class[func].pred_interval[0] + 1)
-            func_class[func].next_invok_start = [(p - min(func_class[func].idle_info["std"], EN_STD), 
-                                                p + min(func_class[func].idle_info["std"], EN_STD))]
-    
     # 筛选出可预测函数并根据训练集进行初步预测
     PE_THRESHOLD = 0.2
 
@@ -182,7 +33,13 @@ if __name__ == "__main__":
     PREDICT_WINDOW = 60
 
     PID_TARGET = 0.15   #冷启动率
-    T_ALPHA = 0.2
+    T_ALPHA = 0.2       #浮动参数
+    BETA = 0.1          #实例参数
+
+    HISTORY_TIMEOUT = 12*60     # 12小时  
+    HISTORY_LENGTH = 6          # 6条调用记录
+    IAT_MIN = 1
+    IAT_QUANTILE = 0.8     #IAT置信分位数
 
     df = pl.read_csv("/home/dell/xyf/AMC/func_info.csv")
     df = df.filter(pl.col('Type') != 2)   #过滤regular
@@ -193,7 +50,8 @@ if __name__ == "__main__":
             .filter(~pl.col('CV_WT').is_nan())\
             .filter(pl.col('PE')> 0.1)\
                                                     #  2 < CV_WT < 5 && PE > 0.1
-    df_union = pl.concat([pe_df, cv_WT_df]).unique()    
+    df_union = pl.concat([pe_df, cv_WT_df]).unique()
+
     predictable_func_ids = df_union.select('Function').to_numpy().flatten().tolist()
     predictable_func_ids = set(predictable_func_ids)
     pred_func_account = {}
@@ -228,47 +86,55 @@ if __name__ == "__main__":
     #         pred_result = list(map(lambda x: round(x) if x > 0 else 0, pred_result))
     #         pred_func_account[func] = pred_result
     #         pbar.update(1)
-    with open('./prediction_result/LazyProhet/0_59_result.pkl', 'rb') as f:
+    with open('/home/dell/xyf/AMC/method_exp/prediction_result/LazyProhet/0_59_result.pkl', 'rb') as f:
         pred_func_account = pkl.load(f)
 
     memory = set()
 
-    for func in train_func_arrcount: #Pre_warm for testing at time 0
+    for func in train_func_ids: # Pre_warm for testing at time 0
         _type = func_class[func].type
 
-        if _type == WARM:
-            memory.add(func)
-            func_class[func].load(0)
-        elif _type == REGULAR and func_class[func].last_call == -1 \
+        if _type == REGULAR and func_class[func].last_call == -1 \
             and (func_class[func].lasting_info["max"] > 1 or func_class[func].lasting_info["seq_num"] == 1):
             memory.add(func)
-            func_class[func].load(0)
+            func_class[func].load(0, 1)
         if _type == REGULAR:
             for (left, right) in func_class[func].next_invok_start:
                 if left <= PRE_WARM and right >= -PRE_WARM:
                     memory.add(func)
-                    func_class[func].load(0)
+                    func_class[func].load(0, 1)
                     break
         
         # 根据预测结果进行预热
         if func in pred_func_account:
             pred_result = pred_func_account[func]
-            if not func_class[func].state and pred_result[0] > 0:
+            if pred_result[0] > 0:
                 memory.add(func)
-                func_class[func].load(0)
+                func_class[func].load(0, pred_result[0])
     
     # 模拟
-    func_cold = {func: 0 for func in test_func_arrcount}    #冷启动次数
-    func_invok = {func: 0 for func in test_func_arrcount}   #调用次数
-    func_invok_seq = {func:[] for func in test_func_arrcount}
+    # func_cold = {func: 0 for func in test_func_arrcount}    #冷启动次数
+    # func_invok = {func: 0 for func in test_func_arrcount}   #调用次数
+    # func_invok_seq = {func:[] for func in test_func_arrcount}
 
-    func_invok_bool = {func: 0 for func in test_func_arrcount}  #存在调用的单位时间
-    func_waste = {func: 0 for func in test_func_arrcount}   #内存浪费的单位时间
+    # func_invok_bool = {func: 0 for func in test_func_arrcount}  #存在调用的单位时间
+    # func_waste = {func: 0 for func in test_func_arrcount}   #内存浪费的单位时间
+    test_func = set(test_func_arrcount.keys())
+    func_cold = {func: 0 for func in predictable_func_ids & test_func}    #冷启动次数
+    func_invok = {func: 0 for func in predictable_func_ids & test_func}   #调用次数
+    func_invok_seq = {func:[] for func in predictable_func_ids & test_func}
+
+    func_invok_bool = {func: 0 for func in predictable_func_ids & test_func}  #存在调用的单位时间
+    func_waste = {func: 0 for func in predictable_func_ids & test_func}   #内存浪费的单位时间
 
     PID_controller = {}
-    for func in test_func_arrcount:
-        if func_class[func].type not in (REGULAR,WARM) and func not in predictable_func_ids:    #除了Regular函数和可预测函数外的函数使用PID控制器
-            PID_controller[func] = PID(0.6, 0.1, 0.05, setpoint=PID_TARGET)
+    IAT_distribution = {}
+    #########待取消
+    # for func in test_func_arrcount:
+    #     if func_class[func].type != REGULAR and func not in predictable_func_ids:    #除了Regular函数和可预测函数外的函数使用PID控制器
+    #         PID_controller[func] = PID(0.6, 0.1, 0.05, setpoint=PID_TARGET)
+    #         IAT_distribution[func] = distribution(HISTORY_TIMEOUT, HISTORY_LENGTH)
+    #########待取消
 
     waste_mem_time = 0
     memory_size = []   
@@ -278,39 +144,66 @@ if __name__ == "__main__":
             # 每隔PREDICT_WINDOW分钟预测一次
             if i % PREDICT_WINDOW == PREDICT_WINDOW - 1 and i != 0:
                 pbar.update(PREDICT_WINDOW)
-                with open(f'./prediction_result/LazyProhet/{i+1}_{i+PREDICT_WINDOW}_result.pkl', 'rb') as f:
-                    pred_func_account = pkl.load(f)                
-                # tasks = [(func, train_func_arrcount[func], func_invok_seq[func], LOCAL_WINDOW, PREDICT_WINDOW)
-                #         for func in predictable_func_ids if func in test_func_arrcount]                
-                # with Pool(2) as pool:
-                #     results = pool.map_async(predict_func, tasks)                    
-                #     pool.close()
-                #     pool.join()
-                # try:
-                #     all_results = results.get()
-                #     for func, pred_result in all_results:
-                #         if func is not None:
-                #             pred_func_account[func] = pred_result
+                
+                with open(f'/home/dell/xyf/AMC/method_exp/prediction_result/LazyProhet/{i+1}_{i+PREDICT_WINDOW}_result.pkl', 'rb') as f:
+                    print(f'load {i+1}_{i+PREDICT_WINDOW}_result')
+                    pred_func_account = pkl.load(f)    
+        
+                tasks = [(func, train_func_arrcount[func], func_invok_seq[func], LOCAL_WINDOW, PREDICT_WINDOW)
+                        for func in predictable_func_ids if func in test_func_arrcount]                
+                with Pool(2) as pool:
+                    results = pool.map_async(predict_func, tasks)                    
+                    pool.close()
+                    pool.join()
+                try:
+                    all_results = results.get()
+                    for func, pred_result in all_results:
+                        if func is not None:
+                            pred_func_account[func] = pred_result
                     
-                #     with open(f'{i+1}_{i+PREDICT_WINDOW}_result.pkl', 'wb') as f:
-                #         pkl.dump(pred_func_account, f)                    
-                # except Exception as e:
-                #     print(f"Error in proccessing: {e}")
+                    with open(f'./prediction_result/LazyProhet/{i+1}_{i+PREDICT_WINDOW}_result.pkl', 'wb') as f:
+                        pkl.dump(pred_func_account, f)                    
+                except Exception as e:
+                    print(f"Error in proccessing: {e}")
     
             random.shuffle(func_corr_lst)
             for func in (func_lst + func_corr_lst): #In case of some functions staying in the memory forever
+                #########待删
+                # if func not in predictable_func_ids:
+                #     continue
+                # if func != 'e370dfc0407dec1f01bd6318b1da2433550d901d1410efc5be13d5125f81ab6d':    # Appro-regular-90mins  cold_rate:37/454    waster_memory:290
+                #     continue
+                if func != '72d7cec815a76ccb4a062882d5d3a651c5180a7578525173dc8efe2fc8452ee9':      # Appro-regular-240mins   cold_rate:4/16    waster_memory:119
+                    continue
+                #########待删
                 _type = func_class[func].type
-                
+
+                # 模拟预热
+                if i in func_class[func].containers_dict:   
+                    load_num = func_class[func].containers_dict.pop(i)
+                    func_class[func].set_containers(i, load_num)
+                    if func_class[func].state:
+                        memory.add(func)
+                    else:
+                        memory.remove(func) if func in memory else None
+
                 if func in test_func_arrcount and test_func_arrcount[func][i] > 0: #invok
                     func_invok[func] += test_func_arrcount[func][i]
                     func_invok_seq[func].append(test_func_arrcount[func][i])
                     func_invok_bool[func] += 1
-                    
+                    if func in IAT_distribution:
+                        IAT_distribution[func].update(i)
+
                     if not func_class[func].state: #cold start
                         func_cold[func] += test_func_arrcount[func][i]
-                        func_class[func].load(i)
+                        func_class[func].load(i, test_func_arrcount[func][i])
                         memory.add(func)
-                        
+                    elif func_class[func].state and func_class[func].containers_num < test_func_arrcount[func][i]: # 部分冷启动
+                        func_cold[func] += test_func_arrcount[func][i] - func_class[func].containers_num
+                        func_class[func].load(i, test_func_arrcount[func][i]-func_class[func].containers_num)
+                    elif func_class[func].state and func_class[func].containers_num >= test_func_arrcount[func][i]: # 热启动
+                        waste_mem_time += func_class[func].containers_num - test_func_arrcount[func][i]
+
                     if func_class[func].wait_time is None or func_class[func].wait_time > 0: #A new invocation seq begins currently
                         func_class[func].pre_call_start = i
                         func_class[func].adp_wait.append(func_class[func].wait_time)
@@ -320,7 +213,8 @@ if __name__ == "__main__":
                             if _type == REGULAR:
                                 if abs(np.median(func_class[func].adp_wait) - func_class[func].pred_interval[0]) > max(1, func_class[func].idle_info["std"]):
                                     func_class[func].pred_interval[0] = (func_class[func].pred_interval[0]+np.median(func_class[func].adp_wait))/2
-                        if SHIFT and len(func_invok_seq) % 360 == 358:    # 每6个小时更新一次可预测函数,预测前更新 
+
+                        if SHIFT and len(func_invok_seq) % 180 == 178:    # 每3个小时更新一次可预测函数,预测前更新 
                             is_predicable = False
                             invoke_seq = np.array(func_invok_seq[func]).astype(float)
                             pe = permutation_entropy(func_invok_seq[func])
@@ -335,7 +229,8 @@ if __name__ == "__main__":
                                 predictable_func_ids.add(func)
                             else:
                                 predictable_func_ids.discard(func)  
-                                PID_controller[func] = PID(0.6, 0.1, 0.5, setpoint=PID_TARGET)    #不再可预测的函数使用PID控制器
+                                # PID_controller[func] = PID(0.6, 0.1, 0.5, setpoint=PID_TARGET)          # 不再可预测的函数使用PID控制器
+                                # IAT_distribution[func] = distribution(HISTORY_TIMEOUT, HISTORY_LENGTH)
 
                     func_class[func].wait_time = 0
                     func_class[func].last_call = i
@@ -353,7 +248,7 @@ if __name__ == "__main__":
                         func_class[func].wait_time += 1
                         
                     if func in memory:
-                        waste_mem_time += 1
+                        waste_mem_time += func_class[func].containers_num
                         if func in func_waste:
                             func_waste[func] += 1
                     
@@ -373,29 +268,30 @@ if __name__ == "__main__":
                             func_class[func].unload()
                         elif pre_warm_flag:
                             memory.add(func)
-                            func_class[func].load(i)
+                            func_class[func].load(i, 1)
                             
-                if func in pred_func_account:     #可预测函数 TODO：请求并发度
-                    if pred_func_account[func][(i+1) % PREDICT_WINDOW] > 0:
-                        pre_warm_flag = True
-                    if _type != WARM and func_class[func].state and (not pre_warm_flag):
-                        memory.remove(func)
-                        func_class[func].unload()
-                    elif pre_warm_flag:
+                if func in pred_func_account:     #可预测函数 
+                    func_class[func].set_containers(i+1, pred_func_account[func][(i+1) % PREDICT_WINDOW])
+                    if func_class[func].state:
                         memory.add(func)
-                        func_class[func].load(i)
-
-                elif func in PID_controller:
-                    
-                    func_cold_ratio = func_cold[func] / func_invok[func] if func_invok[func] > 0 else 0
-                    score = -1 * PID_controller[func](func_cold_ratio)
-                    if score < PID_TARGET * (1 - T_ALPHA / 2) and func_class[func].state:    #冷启动率低于目标值，可以减少资源
+                    elif not func_class[func].state and func in memory:
                         memory.remove(func)
-                        func_class[func].unload()
-                    elif score > PID_TARGET * (1 + T_ALPHA / 2) and not func_class[func].state:  #冷启动率高于目标值，需增加资源
-                        memory.add(func)
-                        func_class[func].load(i)                           
+                #########待取消
+                # elif func in PID_controller:
+                #     iat = IAT_distribution[func].predict_IAT(IAT_MIN, i, IAT_QUANTILE)
+                #     func_cold_ratio = func_cold[func] / func_invok[func] if func_invok[func] > 0 else 0
+                #     score = -1 * PID_controller[func](func_cold_ratio)
+                #     if score < PID_TARGET * (1 - T_ALPHA / 2):    #冷启动率低于目标值，可以减少资源
+                #         result = int(func_class[func].containers_num - max(1, func_class[func].containers_num * BETA))
+                        
+                #     elif score > PID_TARGET * (1 + T_ALPHA / 2):  #冷启动率高于目标值，需增加资源
+                #         result = int(func_class[func].containers_num + max(1, func_class[func].containers_num * BETA))
 
+                #     if result >= 0:
+                #         func_class[func].containers_dict[i + iat] = result
+                #     else:
+                #         func_class[func].containers_dict[i + iat] = 0
+                #########待取消
             memory_size.append(len(memory))
             
     cold_ratio = [cold/func_invok[func] for func, cold in func_cold.items()]
@@ -404,12 +300,12 @@ if __name__ == "__main__":
     print(np.percentile(cold_ratio, 50), np.percentile(cold_ratio, 75), np.percentile(cold_ratio, 90))
 
     #保存记录
-    os.makedirs("./Concurrency/PAC_result", exist_ok=True)
+    os.makedirs("./noConcurrency/PAC_result", exist_ok=True)
     cur_time = time.strftime("%m-%d-%H-%M", time.localtime())
-    json_pretty_dump(func_cold, f"./Concurrency/PAC_result/func_cold_{cur_time}.json")
-    json_pretty_dump(func_waste, f"./Concurrency/PAC_result/func_waste_{cur_time}.json")
-    json_pretty_dump(func_invok, f"./Concurrency/PAC_result/func_invok_{cur_time}.json")
-    json_pretty_dump(memory_size, f"./Concurrency/PAC_result/memory_size_{cur_time}.json")
+    json_pretty_dump(func_cold, f"./noConcurrency/PAC_result/func_cold_{cur_time}.json")
+    json_pretty_dump(func_waste, f"./noConcurrency/PAC_result/func_waste_{cur_time}.json")
+    json_pretty_dump(func_invok, f"./noConcurrency/PAC_result/func_invok_{cur_time}.json")
+    json_pretty_dump(memory_size, f"./noConcurrency/PAC_result/memory_size_{cur_time}.json")
 
     #分析
     cold_ratio = [cold/func_invok[func] for func, cold in func_cold.items()]
@@ -470,4 +366,4 @@ if __name__ == "__main__":
     ax4.set_title('Cold Start Exceed Ratio')
     add_value_labels(ax4, cold_ratio_exceed_rate)
 
-    plt.savefig("./Concurrency/PAC_result/PAC_result.png")
+    plt.savefig("./noConcurrency/PAC_result/PAC_result.png")
