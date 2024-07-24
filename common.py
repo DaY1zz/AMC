@@ -5,6 +5,8 @@ import time
 import pickle as pkl
 from math import factorial
 from LazyProphet import LazyProphet as lp
+from scipy.stats import expon
+import math
 
 
 FILL_ZERO_FLAG = True
@@ -12,23 +14,17 @@ shown_func_num = 1000
 UNKNOWN, WARM, REGULAR, APPRO_REGULAR, DENSE, SUCCESSIVE, PLUSED, POSSIBLE, CORR, NEW_POSS = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 #Diviable? Active?
 TYPE_NUM = 10
 
+#PESE PARAMETER
 SEQ_NUM_BOUND = 3 #Too infrequently invoked functions should not be categorized to this type.
-
 IDLE_NUM_MAX = 3 #Consider the first n modes
 IDLE_PERCEN = 0.9
-
 DENSE_UPPER_BOUND = 5 #the small constant
 DENSE_PERCEN = 90
-
 PLUSED_GIVEUP = 3
 POSS_GIVEUP = 1
 CORR_GIVEUP = 1
-
 PRE_WARM = 2
 DISCRETE_TH = 10
-
-EN_STD = 2
-
 GIVE_UP = {
     UNKNOWN: POSS_GIVEUP,
     WARM: 1440 * 14,
@@ -42,12 +38,15 @@ GIVE_UP = {
     NEW_POSS: POSS_GIVEUP,
 }
 CORR_REMOVAL_TH = 2
+EN_STD = 2
+
+
 
 SHIFT = True #adaptive strategies
+CONCURRENCY = False  #Concurrent execution 
 
 label_lst = ['Unknown','Warm', 'Regular', "Appro-regular", "Dense", "Successive", "Plused", "Possible", "Corr"]
 color_lst = ['#F5B3A2','#BC90B6','#2A4597','#DDC3C7', '#6A9C79', '#C5563B',"#F1AB3D", '#58A0A4','#E5F1E5',"#FBDEAF"]
-
 
 class func_state:
     def __init__(self, _type = 0, forget = 0):
@@ -69,10 +68,14 @@ class func_state:
         self.next_invok_start = []
         
         self.adp_wait = []
+        self.containers_num = 0
+        self.containers_dict = dict()
     
-    def load(self, load_time):
+    def load(self, load_time, load_num=None):
         self.state = True
         self.load_time = load_time
+        if load_num != None:
+            self.containers_num += load_num
     
     def cal_lasting(self, cur_time):
         if not self.state:
@@ -82,7 +85,16 @@ class func_state:
     def unload(self):
         self.state = False
         self.load_time = None
-    
+        self.containers_num = 0
+        
+    def set_containers(self, set_time, containers_num):
+        if containers_num > 0:
+            self.state = True
+            self.load_time = set_time
+            self.containers_num = containers_num
+        elif containers_num == 0:
+            self.unload()
+
     def cal_wait(self):
         if self.wait_time is None:
             self.wait_time = 0
@@ -183,15 +195,8 @@ def sliding_window_prediction(model, train_data, valid_data, local_window, predi
     average_time = total_time / prediction_count if prediction_count > 0 else 0
     return predictions, average_time
 
-def load_checkpoint(filename):
-    with open(filename, 'rb') as f:
-        variables = pkl.load(f)
-    globals().update(variables)
 
-def save_checkpoint(filename, variables):
-    with open(filename, 'wb') as f:
-        pkl.dump(variables, f)
-
+#   LazyProphet 拟合预测函数负载
 def predict_func(args):
     func, arr, invok_seq, LOCAL_WINDOW, PREDICT_WINDOW = args
     # LighGBM 的参数
@@ -221,5 +226,33 @@ def predict_func(args):
         window_data = window_data[-LOCAL_WINDOW:]
     lp_model.fit(window_data)
     pred_result = lp_model.predict(PREDICT_WINDOW).flatten()
+    pred_result = list(map(lambda x: round(x) if x > 0 else 0, pred_result))
     
     return func, pred_result
+
+
+class distribution:
+    def __init__(self, history_timeout, history_maxlength):
+        self.history_timeout = history_timeout
+        self.history_maxlength = history_maxlength
+        self.history = []
+    
+    def update(self, arrival_time):
+        self.history = list(filter(lambda x: arrival_time - x < self.history_timeout, self.history))
+        if len(self.history) == self.history_maxlength:
+            self.history.pop(0)
+
+        self.history.append(arrival_time)
+
+    def predict_IAT(self, min, current_time, quantile):
+        if len(self.history) == 0:
+            return min
+        else:
+            mean = (current_time - self.history[0]) / len(self.history)
+            if mean > 0:
+                exponential = expon(scale=mean)
+                IAT = math.ceil(exponential.ppf(quantile))
+                return IAT
+            else:
+                return min
+

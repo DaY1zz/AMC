@@ -43,7 +43,6 @@ if __name__ == "__main__":
 
     df = pl.read_csv("/home/dell/xyf/AMC/func_info.csv")
     df = df.filter(pl.col('Type') != 2)   #过滤regular
-
     pe_df = df.filter(pl.col('PE') > PE_THRESHOLD)  #   PE > 0.2
     cv_WT_df = df.filter((pl.col('CV_WT') > CV_WT_LOWER_THRESHOLD))\
             .filter((pl.col('CV_WT') < CV_WT_UPPER_THRESHOLD))\
@@ -149,22 +148,22 @@ if __name__ == "__main__":
                     print(f'load {i+1}_{i+PREDICT_WINDOW}_result')
                     pred_func_account = pkl.load(f)    
         
-                tasks = [(func, train_func_arrcount[func], func_invok_seq[func], LOCAL_WINDOW, PREDICT_WINDOW)
-                        for func in predictable_func_ids if func in test_func_arrcount]                
-                with Pool(2) as pool:
-                    results = pool.map_async(predict_func, tasks)                    
-                    pool.close()
-                    pool.join()
-                try:
-                    all_results = results.get()
-                    for func, pred_result in all_results:
-                        if func is not None:
-                            pred_func_account[func] = pred_result
+                # tasks = [(func, train_func_arrcount[func], func_invok_seq[func], LOCAL_WINDOW, PREDICT_WINDOW)
+                #         for func in predictable_func_ids if func in test_func_arrcount]                
+                # with Pool(2) as pool:
+                #     results = pool.map_async(predict_func, tasks)                    
+                #     pool.close()
+                #     pool.join()
+                # try:
+                #     all_results = results.get()
+                #     for func, pred_result in all_results:
+                #         if func is not None:
+                #             pred_func_account[func] = pred_result
                     
-                    with open(f'./prediction_result/LazyProhet/{i+1}_{i+PREDICT_WINDOW}_result.pkl', 'wb') as f:
-                        pkl.dump(pred_func_account, f)                    
-                except Exception as e:
-                    print(f"Error in proccessing: {e}")
+                #     with open(f'./prediction_result/LazyProhet/{i+1}_{i+PREDICT_WINDOW}_result.pkl', 'wb') as f:
+                #         pkl.dump(pred_func_account, f)                    
+                # except Exception as e:
+                #     print(f"Error in proccessing: {e}")
     
             random.shuffle(func_corr_lst)
             for func in (func_lst + func_corr_lst): #In case of some functions staying in the memory forever
